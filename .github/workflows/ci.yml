@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, develop]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "22"
+  SUPABASE_CLI_VERSION: "2.119.0"
+
+jobs:
+  # 1. Rapide : garde-fous, lint, types, tests unitaires, build.
+  quality:
+    name: Qualité (garde-fous, lint, types, unitaires, build)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Garde-fous (fichiers protégés, migrations intactes, pas de .only/.skip)
+        run: npm run check:protected
+
+      - name: Migrations additives uniquement
+        run: npm run check:migrations
+
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run test
+
+      - name: Build de production
+        run: npm run build
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: http://127.0.0.1:54321
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: build-placeholder-anon-key-000000
+          NEXT_TELEMETRY_DISABLED: "1"
+
+  # 2. Aucun secret ne doit entrer dans le dépôt.
+  secrets:
+    name: Scan des secrets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 3. Base de données réelle (Supabase local jetable) : RLS puis parcours utilisateur complets.
+  database-e2e:
+    name: Base de données (RLS) et tests d'acceptation
+    runs-on: ubuntu-24.04
+    needs: quality
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      - uses: supabase/setup-cli@v1
+        with:
+          version: ${{ env.SUPABASE_CLI_VERSION }}
+
+      - name: Démarrer Supabase local (migrations + seed)
+        run: supabase start -x realtime,storage-api,imgproxy,studio,postgres-meta,edge-runtime,logflare,vector,supavisor
+
+      - name: Lint SQL (fonctions plpgsql)
+        run: supabase db lint --level error
+
+      - name: Tests RLS
+        run: npm run test:db
+
+      - name: Exporter les variables Supabase
+        run: |
+          supabase status -o env \
+            --override-name api.url=NEXT_PUBLIC_SUPABASE_URL \
+            --override-name auth.anon_key=NEXT_PUBLIC_SUPABASE_ANON_KEY \
+            --override-name auth.service_role_key=SUPABASE_SERVICE_ROLE_KEY \
+            | grep -E '^(NEXT_PUBLIC_SUPABASE_URL|NEXT_PUBLIC_SUPABASE_ANON_KEY|SUPABASE_SERVICE_ROLE_KEY)=' \
+            | sed -E 's/="(.*)"$/=\1/' >> "$GITHUB_ENV"
+
+      - name: Vérifier les variables
+        run: |
+          for v in NEXT_PUBLIC_SUPABASE_URL NEXT_PUBLIC_SUPABASE_ANON_KEY SUPABASE_SERVICE_ROLE_KEY; do
+            if [ -z "${!v}" ]; then echo "::error::$v manquante"; exit 1; fi
+          done
+          echo "Supabase : $NEXT_PUBLIC_SUPABASE_URL"
+
+      - name: Build
+        run: npm run build
+        env:
+          NEXT_PUBLIC_SITE_URL: http://localhost:3000
+          NEXT_TELEMETRY_DISABLED: "1"
+
+      - name: Installer Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Tests d'acceptation (Playwright)
+        run: npm run test:e2e
+        env:
+          NEXT_PUBLIC_SITE_URL: http://localhost:3000
+
+      - name: Rapport Playwright
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7
