@@ -9,6 +9,8 @@ export function friendlyDbError(error: { code?: string; message?: string } | nul
       return "Vous n'avez pas les droits pour cette action.";
     case "P0002":
       return "Élément introuvable, invalide ou expiré.";
+    case "23503":
+      return "Impossible : cet élément est encore utilisé (par exemple un client qui a des commandes).";
     case "28000":
       return "Veuillez vous reconnecter.";
     case "22023":

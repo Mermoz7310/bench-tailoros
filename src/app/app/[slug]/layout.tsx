@@ -9,6 +9,7 @@ export default async function OrgLayout({ children, params }: { children: ReactN
   const base = `/app/${org.slug}`;
   const links = [
     { href: base, label: "Tableau de bord", show: true },
+    { href: `${base}/customers`, label: "Clients", show: true },
     { href: `${base}/members`, label: "Membres", show: can(role, "members.view") },
     { href: `${base}/billing`, label: "Facturation", show: can(role, "billing.view") },
     { href: `${base}/audit`, label: "Journal", show: can(role, "audit.view") },
